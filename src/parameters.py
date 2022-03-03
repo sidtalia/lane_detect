@@ -21,7 +21,7 @@ class Parameters():
     feature_size = 4
     regression_size = 110
     mode = 2
-    threshold_point = 0.81
+    threshold_point = 0.95
     threshold_instance = 0.22
 
     #loss function parameter
