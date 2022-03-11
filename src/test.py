@@ -40,12 +40,11 @@ if torch.cuda.is_available():
 print('Testing loop')
 lane_agent.evaluate_mode()
 
-
 def run_lane_detect(test_image): # check model with a picture
     test_image = cv2.resize(test_image, (512,256))/255.0
     test_image = np.rollaxis(test_image, axis=2, start=0)
     x, y, ti = test(lane_agent, np.array([test_image]))
-    ti[0] = cv2.resize(ti[0], (1280, 640))
+    ti[0] = cv2.resize(ti[0], (512, 256))
     return x,y,ti[0]
 
 
@@ -131,7 +130,6 @@ def save_result(result_data, fname):
 ## test on the input test image
 ############################################################################
 def test(lane_agent, test_images, thresh = p.threshold_point):
-
     result = lane_agent.predict_lanes_test(test_images)
     confidences, offsets, instances = result[-1]
     

@@ -22,7 +22,7 @@ class Parameters():
     regression_size = 110
     mode = 2
     threshold_point = 0.95
-    threshold_instance = 0.22
+    threshold_instance = 0.5
 
     #loss function parameter
     K1 = 1.0                     #  ####################################
