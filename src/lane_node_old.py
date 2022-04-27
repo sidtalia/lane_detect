@@ -54,7 +54,6 @@ def rgbclahe(img):
 
 class lane_driver:
   def __init__(self):
-    self.done_processing = True
     self.pos = np.zeros(3)  # using ENU ref frame according to ROS REP-105
     self.init_pos = np.zeros(3)
     self.init = False
@@ -65,7 +64,7 @@ class lane_driver:
     self.quat = np.array([1,0,0,0])
     self.rpy = np.zeros(3)
     self.inferred_yaw = 0
-    self.LWB2 = 1.5
+    self.LWB2 = 2
     self.pc = np.zeros(3)  # center curve polynomial in local ref frame
     self.posX = 0
     self.posY = 0
@@ -73,13 +72,11 @@ class lane_driver:
     self.xcw_list = []
     self.ycw_list = []
 
-    # TODO: this information should be obtained from the camera info topic
     self.ox = 512/2
     self.oy = 512/2 + 64
     self.fov_x = 104
     self.fov_y = 72
     self.height = 1.25
-    self.pitch = 0
     DEG2RAD = 1/57.3
     self.K_v = m.tan(self.fov_y*DEG2RAD/2)
     self.K_h = m.tan(self.fov_x*DEG2RAD/2)
@@ -96,10 +93,11 @@ class lane_driver:
     self.expected_frame_time = 0.1
     self.reject_counter = 0
     self.frame_counter = 0
-    self.gps_x, self.gps_y = find_route(28.547373, 77.183662,28.544931, 77.194203, 28.544736, 77.183385)
+    self.gps_x, self.gps_y = find_route(28.547373, 77.183662,28.544931, 77.194203, 28.544728, 77.183394)
     self.gps_xb = 0
     self.gps_yb = 0
     self.shift = np.zeros(2)
+    self.done_processing = True
 
   def quaternion_to_angle(self, q):
     """
@@ -132,16 +130,13 @@ class lane_driver:
     self.quat[2] = msg.pose.pose.orientation.z
     self.quat[3] = msg.pose.pose.orientation.w
 
-    rpy = self.quaternion_to_angle(msg.pose.pose.orientation)
-    rpy_diff = rpy - self.rpy
-    self.rpy = rpy
+    self.rpy = self.quaternion_to_angle(msg.pose.pose.orientation)
     # print(self.rpy*57.3)
-    self.inferred_yaw = self.rpy[2] + 4/57.3 #self.inferred_yaw + self.rotBF[2]*0.04 ## 50 hz
+    self.inferred_yaw = self.rpy[2] + 2/57.3 #self.inferred_yaw + self.rotBF[2]*0.04 ## 50 hz
     # R = np.array([[m.cos(self.inferred_yaw), -m.sin(self.inferred_yaw)],
     #               [m.sin(self.inferred_yaw), m.cos(self.inferred_yaw)]])
     # x, y = np.matmul(R,np.array([np.linalg.norm(self.vel)*0.02, 0]))
     self.posX, self.posY = self.pos[0], self.pos[1] #self.posX + x, self.posY + y
-    self.pitch = 0.8*(rpy_diff[1] + self.pitch)
 
   def img2XY(self, X_pix, Y_pix,height,K_v,K_h,Xmax,Ymax,X_Center,Y_Center_default,pitch):
     Y_Center = Y_Center_default - Ymax*m.tan(pitch)/K_v
@@ -169,7 +164,7 @@ class lane_driver:
     lane_y = []
     for i in range(len(x)):
       xl, yl = self.img2XY(np.array(x[i]), np.array(y[i]) + self.oy - 64, self.height, self.K_v, self.K_h,
-                      self.ox*2, self.oy*2, self.ox, self.oy, 0.01 - self.pitch) # todo: fix this self.oy should not be added directly to Y
+                      self.ox*2, self.oy*2, self.ox, self.oy, 0.01) # todo: fix this self.oy should not be added directly to Y
       index = np.where(yl < self.min_dist + self.lookahead)
       xl = -xl[index]
       yl = yl[index]
@@ -182,8 +177,8 @@ class lane_driver:
     y_ = x
 
     xl, yl = self.XY2img(x_, y_, self.height, self.K_v, self.K_h,
-                    self.ox*2, self.oy*2, self.ox, self.oy, 0.01 - self.pitch, 512)
-    return xl, yl - self.oy + 36
+                    self.ox*2, self.oy*2, self.ox, self.oy, -0.08, 512)
+    return xl, yl - self.oy
             
   ## I'm performing a 2D transformation from body to world frame. 
   ## This transform will hold so long as we travel on a surface that is "mostly flat"
@@ -246,12 +241,6 @@ class lane_driver:
     ## initialze the centerline with the assumption that points are good and pre-aligned (mostly)
     xb, yb = self.project_cam_to_bodyframe(x, y)
 
-    gps_xb, gps_yb = self.transform_world_to_bodyframe(np.copy(self.gps_x - self.init_pos[0]), np.copy(self.gps_y - self.init_pos[1]), xw, yw, th, radius = 5)
-    index = np.where((gps_xb > 5) & (gps_xb < 20))
-    gps_xb = gps_xb[index]
-    gps_yb = gps_yb[index]
-    self.gps_xb, self.gps_yb = gps_xb, gps_yb
-
     left_index = 0
     right_index = 1
     try:
@@ -265,8 +254,8 @@ class lane_driver:
 
     left_points = yb[left_index] - self.LWB2
     right_points = yb[right_index] + self.LWB2
-    if(np.fabs(left_points.mean() - right_points.mean()) > 0.5 or 1):
-      if(np.fabs(left_points.mean()) < np.fabs(right_points.mean() and 0)):
+    if(np.fabs(left_points.mean() - right_points.mean()) > 0.5):
+      if(np.fabs(left_points.mean()) < np.fabs(right_points.mean())):
         use_index = left_index
         ycb = left_points
         xcb = xb[left_index]
@@ -284,8 +273,7 @@ class lane_driver:
       return
     pc = np.poly1d(np.polyfit(xcb, ycb, 2))
     max_dist = np.max(xcb)
-    self.x, self.y = xcb, ycb
-
+    
     if(not self.lane_init):
       xcb = np.arange(self.min_dist, max_dist, 0.5)
       ycb = pc(xcb)  # get corresponding points
@@ -297,46 +285,48 @@ class lane_driver:
       return
 
     last_x, last_y = self.transform_world_to_bodyframe(np.copy(self.xcw_list), np.copy(self.ycw_list), xw, yw, th, radius = 5)
-    index = np.where((last_x > 0) & (last_x < self.lookahead))
+    index = np.where((last_x > 5) & (last_x < 20))
     # if(len(index) < 20):
     #   # self.reject_counter += 1
     #   index = np.where(last_x > 0)
     #   # return
     last_x = last_x[index]
     last_y = last_y[index]
-    # index = np.where(np.fabs(last_y) < self.LWB2)
-    # last_x = last_x[index]
-    # last_y = last_y[index]
+    index = np.where(np.fabs(last_y) < self.LWB2)
+    last_x = last_x[index]
+    last_y = last_y[index]
 
     # last_x = last_x[-40:]
     # last_y = last_y[-40:]  # limit number of points
 
-    separation =  np.fabs(last_y.mean() - ycb.mean())
-    num_points = 10.0/min(max(1.0, separation),5.0)
+    separation = np.fabs(last_y.mean() - ycb.mean())
+    num_points = 50.0/min(max(1.0, separation),5.0)
     interp_dist = max_dist/num_points
 
     xcb = np.arange(self.min_dist, max_dist, interp_dist)
     ycb = pc(xcb)  # get corresponding points
 
-    x_filt = np.concatenate((last_x, self.x))
-    y_filt = np.concatenate((last_y, self.y))
-    index = np.where( (x_filt < 20) & (x_filt > 5) )
-    x_filt = x_filt[index]
-    y_filt = y_filt[index]
-
+    x_filt = np.concatenate((last_x, xcb))
+    y_filt = np.concatenate((last_y, ycb))
     pc_filt = np.poly1d(np.polyfit(x_filt, y_filt, 2))
     xcb = np.arange(self.min_dist, max_dist, 0.5)
     ycb = pc_filt(xcb)
 
+    gps_xb, gps_yb = self.transform_world_to_bodyframe(np.copy(self.gps_x - self.init_pos[0]), np.copy(self.gps_y - self.init_pos[1]), xw, yw, th, radius = 5)
+    index = np.where((gps_xb > 5) & (gps_xb < 20))
+    gps_xb = gps_xb[index]
+    gps_yb = gps_yb[index]
     yc_gps = pc_filt(gps_xb)
-    shift_lateral = y_filt.mean() - gps_yb.mean()
+    shift_lateral = yc_gps.mean() - gps_yb.mean()
+    self.gps_xb, self.gps_yb = gps_xb, gps_yb
     shift = np.zeros(2)
     shift[0], shift[1] = self.rotate_body_to_worldframe(0, shift_lateral, th)
-    if(len(right_points) > 5):
-      self.gps_x += shift[0]*0.01*len(right_points)
-      self.gps_y += shift[1]*0.01*len(right_points)
+    if(len(left_points) > 10 or len(right_points) > 10):
+      self.gps_x += shift[0]*0.1
+      self.gps_y += shift[1]*0.1
 
-    xcw, ycw = self.transform_body_to_worldframe(self.x, self.y, xw, yw, th)
+    xcw, ycw = self.transform_body_to_worldframe(xcb, ycb, xw, yw, th)
+    self.x, self.y = xcb, ycb
     self.xcw_list = np.concatenate((self.xcw_list, xcw))
     self.ycw_list = np.concatenate((self.ycw_list, ycw))
     self.last_pos = np.array([xw, yw])
@@ -361,34 +351,30 @@ class lane_driver:
       self.lane_stuff(x, y, world_X, world_Y, world_th)
       # self.x, self.y = self.project_cam_to_bodyframe(x, y)
       try:
-        # last_x, last_y = self.transform_world_to_bodyframe(np.copy(self.xcw_list), np.copy(self.ycw_list), world_X, world_Y, world_th, radius = 5)
-        # index = np.where(last_x > self.min_dist)
-        # last_x = last_x[index]
-        # last_y = last_y[index]
-        # # index = np.where(np.fabs(last_y) < self.LWB2)
-        # # last_x = last_x[index]
-        # # last_y = last_y[index]
+        last_x, last_y = self.transform_world_to_bodyframe(np.copy(self.xcw_list), np.copy(self.ycw_list), world_X, world_Y, world_th, radius = 5)
+        index = np.where(last_x > self.min_dist)
+        last_x = last_x[index]
+        last_y = last_y[index]
+        index = np.where(np.fabs(last_y) < self.LWB2)
+        last_x = last_x[index]
+        last_y = last_y[index]
 
-        # last_x = last_x[-40:]
-        # last_y = last_y[-40:]  # limit number of points      
-        # pc_filt = np.poly1d(np.polyfit(last_x, last_y, 2))
-        # max_dist = np.max(last_x)
-        # fit_x = last_x #np.arange(self.min_dist, max_dist, 0.5)
-        # fit_y = last_y #pc_filt(fit_x)
-        # x, y = self.project_bodyframe_to_cam(np.copy(fit_x), np.copy(fit_y))
-        # pts = np.column_stack((np.int32(x),np.int32(y)))
-        # # cv2.polylines(lane_img, [pts], False, (0,0,0), 5)
+        last_x = last_x[-40:]
+        last_y = last_y[-40:]  # limit number of points      
+        pc_filt = np.poly1d(np.polyfit(last_x, last_y, 2))
+        max_dist = np.max(last_x)
+        fit_x = np.arange(self.min_dist, max_dist, 0.5)
+        fit_y = pc_filt(fit_x)
+        x, y = self.project_bodyframe_to_cam(np.copy(fit_x), np.copy(fit_y))
+        pts = np.column_stack((np.int32(x),np.int32(y)))
+        cv2.polylines(lane_img, [pts], False, (0,0,0), 5)
         x, y = self.project_bodyframe_to_cam(np.copy(self.gps_xb), np.copy(self.gps_yb))
         pts = np.column_stack((np.int32(x),np.int32(y)))
         cv2.polylines(lane_img, [pts], False, (255,255,255), 5)
-        # x, y = self.project_bodyframe_to_cam(np.copy(self.x), np.copy(self.y))
-        # pts = np.column_stack((np.int32(x),np.int32(y)))
-        # # cv2.polylines(lane_img, [pts], False, (255,255,0), 5)
-        # self.fit_x, self.fit_y = self.transform_body_to_worldframe(fit_x, fit_y, world_X, world_Y, world_th)
+        self.fit_x, self.fit_y = self.transform_body_to_worldframe(fit_x, fit_y, world_X, world_Y, world_th)
       except:
         print(traceback.format_exc())
       if DEBUG:
-        lane_img = cv2.resize(lane_img, (800, 400))
         cv2.imshow("test", lane_img)
         cv2.waitKey(1)
 
@@ -417,4 +403,3 @@ while not rospy.is_shutdown():
   except:
     pass
     # print(traceback.format_exc())
-

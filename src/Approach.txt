@@ -1,0 +1,14 @@
+our approach
+
+1) Uses GPS/INS system to get high accuracy odometry, orientation and filtered GPS location.
+2) Method is not concerned with having exact global location because we translate the GPS based lane marker location in the car's odometry reference frame instead of correcting the car's own location. The system is focused towards navigation and not localization
+3) Method:
+	1) Get lane detections using lane markers. The system estimates the lane width using the lane marker separation as well, so the initial estimate can be slightly off if a bad starting estimate is provided for lane width.
+	2) Transform points from image frame to body-frame
+	3) Find the lane center coordinates by shifting the left and right lane markers to the center. -> this is where the error creeps in. If we know the lane width correctly, this becomes less of an issue (perhaps if we used only 1 side which as more markers?)
+	3) Get gps based lane markers in body reference frame using current orientation and GPS coordinates
+	4) if this is the first detection, transform the points to odom frame coordinates and add them to a odom_frame_lane_points list.
+	5) else: using the vehicle's current position in the odometry reference frame, transform the previously detected points from odometry frame to current body frame.
+		1) From the previously detected points, take points that fall within a certain distance from the car (limit the horizon for the points)
+		2) Put the previously detected and newly detected points into an array and perform a 2D polynomial fit. This is in effect performing a low-pass filter over distance instead of time.
+		3) Use the difference between the lateral mean of these fused points and the gps based path to correct the position of the GPS based path.
