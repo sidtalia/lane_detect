@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # Import ROS libraries and messages
 import rospy
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, NavSatFix
+from geometry_msgs.msg import PoseStamped, Pose, PoseArray
 from nav_msgs.msg import Odometry
 import tf.transformations
-
+from scipy.ndimage import gaussian_filter 
 import test
 from test import *
 # Import OpenCV libraries and tools
@@ -65,7 +66,7 @@ class lane_driver:
     self.quat = np.array([1,0,0,0])
     self.rpy = np.zeros(3)
     self.inferred_yaw = 0
-    self.LWB2 = 1.5
+    self.LWB2 = 2.0
     self.pc = np.zeros(3)  # center curve polynomial in local ref frame
     self.posX = 0
     self.posY = 0
@@ -76,9 +77,9 @@ class lane_driver:
     # TODO: this information should be obtained from the camera info topic
     self.ox = 512/2
     self.oy = 512/2 + 64
-    self.fov_x = 104
+    self.fov_x = 90
     self.fov_y = 72
-    self.height = 1.25
+    self.height = 1.2
     self.pitch = 0
     DEG2RAD = 1/57.3
     self.K_v = m.tan(self.fov_y*DEG2RAD/2)
@@ -89,15 +90,24 @@ class lane_driver:
 
     self.x = None
     self.y = None
+    self.start_lat = 0
+    self.start_lon = 0
+    self.have_gps = False
     # Initalize a subscriber to the "/camera/rgb/image_raw" topic with the function "image_callback" as a callback
     sub_image = rospy.Subscriber("/zed2/zed_node/left/image_rect_color", Image, self.image_callback, queue_size=1)
     sub_odom = rospy.Subscriber("/mavros/local_position/odom", Odometry, self.odom_callback, queue_size = 1)
+    sub_pose = rospy.Subscriber("/mavros/local_position/pose", PoseStamped, self.pose_callback, queue_size=1)
+    sub_gps = rospy.Subscriber("/mavros/global_position/global", NavSatFix, self.gps_callback, queue_size=1)
+    self.lane_pub = rospy.Publisher("/lane_node/points", PoseArray, queue_size = 10)
+    self.path_pub = rospy.Publisher("/lane_node/path", PoseArray, queue_size = 1)
 
     self.last_inference = time.time()
-    self.expected_frame_time = 0.1
+    self.expected_frame_time = 0.05
     self.reject_counter = 0
     self.frame_counter = 0
-    self.gps_x, self.gps_y = find_route(28.547373, 77.183662,28.544931, 77.194203, 28.544736, 77.183385)
+    while not self.have_gps:
+      time.sleep(0.05)
+    self.gps_x, self.gps_y = find_route(self.start_lat, self.start_lon, 28.545925, 77.179456, self.start_lat, self.start_lon)  # 28.545925, 77.179456
     self.gps_xb = 0
     self.gps_yb = 0
     self.gps_shift = np.zeros(2)
@@ -145,6 +155,37 @@ class lane_driver:
     self.posX, self.posY = self.pos[0], self.pos[1] #self.posX + x, self.posY + y
     self.pitch = 0.8*(rpy_diff[1] + self.pitch)
 
+  def gps_callback(self, msg):
+    if(not self.have_gps):
+      self.have_gps = True
+      self.start_lat = msg.latitude
+      self.start_lon = msg.longitude
+      self.posX, self.posY = 0,0
+    else:
+      self.posX, self.posY = calcposNED(msg.latitude, msg.longitude, self.start_lat, self.start_lon)
+
+  def pose_callback(self, msg):
+    self.pos[0] = msg.pose.position.x
+    self.pos[1] = msg.pose.position.y
+    self.pos[2] = msg.pose.position.z
+
+    if(self.init == False):
+      self.init_pos = np.copy(self.pos)
+      self.init = True
+
+    self.pos -= self.init_pos
+
+    self.quat[0] = msg.pose.orientation.x
+    self.quat[1] = msg.pose.orientation.y
+    self.quat[2] = msg.pose.orientation.z
+    self.quat[3] = msg.pose.orientation.w
+
+    rpy = self.quaternion_to_angle(msg.pose.orientation)
+    rpy_diff = rpy - self.rpy
+    self.rpy = rpy
+    self.inferred_yaw = self.rpy[2] - 2/57.3 
+    self.pitch = 0.8*(rpy_diff[1] + self.pitch)
+
   def img2XY(self, X_pix, Y_pix,height,K_v,K_h,Xmax,Ymax,X_Center,Y_Center_default,pitch):
     Y_Center = Y_Center_default - Ymax*m.tan(pitch)/K_v
     Y = height*Ymax/(K_v*(Y_pix - Y_Center))
@@ -185,7 +226,7 @@ class lane_driver:
 
     xl, yl = self.XY2img(x_, y_, self.height, self.K_v, self.K_h,
                     self.ox*2, self.oy*2, self.ox, self.oy, 0.01 - self.pitch, 512)
-    return xl, yl - self.oy + 36
+    return xl, yl - self.oy + 64
             
   ## I'm performing a 2D transformation from body to world frame. 
   ## This transform will hold so long as we travel on a surface that is "mostly flat"
@@ -239,21 +280,85 @@ class lane_driver:
 
   def find_lane_width(self, left, right):
     width = 0.5*np.fabs(left.mean() - right.mean())
-    if(len(left) < 10 or len(right) < 10):
+    if(len(left) < 3 or len(right) < 3):
       return
     else:
       self.LWB2 = self.LWB2*0.9 + 0.1*width
+
+  def interpolate(self, X, Y):
+    for i in range(3):
+      Y = np.dstack((Y[:-1],Y[:-1] + np.diff(Y)/2.0)).ravel()
+      Y = np.dstack((Y[:-1],Y[:-1] + np.diff(Y)/2.0)).ravel()
+      X = np.dstack((X[:-1],X[:-1] + np.diff(X)/2.0)).ravel()
+      X = np.dstack((X[:-1],X[:-1] + np.diff(X)/2.0)).ravel()
+
+      Y = gaussian_filter(Y,sigma=1)
+      X = gaussian_filter(X,sigma=1)
+    return X, Y
+
+  def publish_lane_markers(self, xb, yb, left_index, right_index, xw, yw, th):
+    try:
+      left_points_y = np.copy(yb[left_index])
+      left_points_x = np.copy(xb[left_index])
+      right_points_y = np.copy(yb[right_index])
+      right_points_x = np.copy(xb[right_index])
+      lxw, lyw = self.transform_body_to_worldframe(left_points_x, left_points_y, xw, yw, th)
+      rxw, ryw = self.transform_body_to_worldframe(right_points_x, right_points_y, xw, yw, th)
+
+      lxw += self.init_pos[0]
+      rxw += self.init_pos[0]
+      lyw += self.init_pos[1]
+      ryw += self.init_pos[1]
+
+      ps = PoseArray()
+      ps.header.frame_id = "/odom"
+      ps.header.stamp = rospy.Time.now()
+
+      for i in range(len(lxw)):
+        pose = Pose()
+        pose.position.x = lxw[i]
+        pose.position.y = lyw[i]
+        ps.poses.append(pose)
+      for i in range(len(rxw)):
+        pose = Pose()
+        pose.position.x = rxw[i]
+        pose.position.y = ryw[i]
+        ps.poses.append(pose)
+      self.lane_pub.publish(ps)
+    except:
+      pass
+    return
+
+  def publish_gps_path(self, xw, yw, th):
+      path = PoseArray()
+      path.header.frame_id = "/odom"
+      path.header.stamp = rospy.Time.now()
+
+      x, y = self.transform_body_to_worldframe(np.copy(self.gps_xb), np.copy(self.gps_yb), xw, yw, th)
+      x += self.init_pos[0]
+      y += self.init_pos[1]
+      dy = np.diff(y)
+      dx = np.diff(x)
+      heading = np.arctan2(dy, dx)  # ENU ref frame
+      for i in range(len(self.gps_xb)-1):
+        pose = Pose()
+        pose.position.x = x[i]
+        pose.position.y = y[i]
+        pose.position.z = heading[i]
+        path.poses.append(pose)
+      self.path_pub.publish(path)
+
 
   def lane_stuff(self, x, y, xw, yw, th):
     ## initialze the centerline with the assumption that points are good and pre-aligned (mostly)
     xb, yb = self.project_cam_to_bodyframe(x, y)
 
-    gps_xb, gps_yb = self.transform_world_to_bodyframe(np.copy(self.gps_x - self.init_pos[0] + self.gps_shift[0]), np.copy(self.gps_y - self.init_pos[1] + self.gps_shift[1]), xw, yw, th, radius = 5)
-    index = np.where((gps_xb > 5) & (gps_xb < 20))
+    gps_xb, gps_yb = self.transform_world_to_bodyframe(np.copy(self.gps_x + self.gps_shift[0]), np.copy(self.gps_y + self.gps_shift[1]), xw, yw, th, radius = 5)
+    index = np.where((gps_xb > 0) & (gps_xb < 20))
     gps_xb = gps_xb[index]
     gps_yb = gps_yb[index]
     self.gps_xb, self.gps_yb = gps_xb, gps_yb
-
+    self.publish_gps_path(xw, yw, th)
     left_index = 0
     right_index = 1
     try:
@@ -265,24 +370,15 @@ class lane_driver:
     
     self.find_lane_width(np.copy(yb[left_index]), np.copy(yb[right_index]))  # update lane width using lane markers
 
+    self.publish_lane_markers(xb, yb, left_index, right_index, xw, yw, th)
+
     left_points = yb[left_index] - self.LWB2
     right_points = yb[right_index] + self.LWB2
-    if(np.fabs(left_points.mean() - right_points.mean()) > 0.5 or 1):
-      if(np.fabs(left_points.mean()) < np.fabs(right_points.mean() and 0)):
-        use_index = left_index
-        ycb = left_points
-        xcb = xb[left_index]
-      else:
-        use_index = right_index
-        ycb = right_points
-        xcb = xb[right_index]
-    else:
-      ycb = np.concatenate((left_points, right_points))
-      xcb = np.concatenate((xb[left_index], xb[right_index]))
-    if(np.fabs(ycb[:len(ycb)//2].mean()) > self.LWB2 or len(ycb) < 5):
-      # print("hit")
+
+    ycb = np.concatenate((left_points, right_points))
+    xcb = np.concatenate((xb[left_index], xb[right_index]))
+    if(len(ycb) < 5):
       self.reject_counter += 1
-      # print(100*self.reject_counter/self.frame_counter)
       return
     pc = np.poly1d(np.polyfit(xcb, ycb, 2))
     max_dist = np.max(xcb)
@@ -299,19 +395,11 @@ class lane_driver:
       return
 
     last_x, last_y = self.transform_world_to_bodyframe(np.copy(self.xcw_list), np.copy(self.ycw_list), xw, yw, th, radius = 5)
-    index = np.where((last_x > 0) & (last_x < self.lookahead))
-    # if(len(index) < 20):
-    #   # self.reject_counter += 1
-    #   index = np.where(last_x > 0)
-    #   # return
+    index = np.where((last_x > 5) & (last_x < self.lookahead))
+
     last_x = last_x[index]
     last_y = last_y[index]
-    # index = np.where(np.fabs(last_y) < self.LWB2)
-    # last_x = last_x[index]
-    # last_y = last_y[index]
 
-    # last_x = last_x[-40:]
-    # last_y = last_y[-40:]  # limit number of points
 
     separation =  np.fabs(last_y.mean() - ycb.mean())
     num_points = 10.0/min(max(1.0, separation),5.0)
@@ -322,7 +410,7 @@ class lane_driver:
 
     x_filt = np.concatenate((last_x, self.x))
     y_filt = np.concatenate((last_y, self.y))
-    index = np.where( (x_filt < 20) & (x_filt > 5) )
+    index = np.where( (x_filt < 20) & (x_filt > 0) )
     x_filt = x_filt[index]
     y_filt = y_filt[index]
 
@@ -332,13 +420,17 @@ class lane_driver:
 
     yc_gps = pc_filt(gps_xb)
     shift_lateral = y_filt.mean() - gps_yb.mean()
+    detected_angle = m.atan2(y_filt[-1] - y_filt[0],x_filt[-1] - x_filt[0])
+    predicted_angle = m.atan2(gps_yb[-1] - gps_yb[0], gps_xb[-1] - gps_xb[0])
+    delta = detected_angle - predicted_angle
+    weight = m.cos(delta*2)**2
     shift = np.zeros(2)
     shift[0], shift[1] = self.rotate_body_to_worldframe(0, shift_lateral, th)
     if(len(right_points) > 5):
-      self.gps_shift[0] += shift[0]*0.01*len(right_points)
-      self.gps_shift[1] += shift[1]*0.01*len(right_points)
-      self.gps_shift[0] = max(min(self.gps_shift[0],0.5),-0.5)
-      self.gps_shift[1] = max(min(self.gps_shift[1],0.5),-0.5)
+      self.gps_shift[0] += weight*shift[0]*min(1, 0.05*len(right_points))
+      self.gps_shift[1] += weight*shift[1]*min(1, 0.05*len(right_points))
+      # self.gps_shift[0] = max(min(self.gps_shift[0],5),-5)
+      # self.gps_shift[1] = max(min(self.gps_shift[1],5),-5)
 
     xcw, ycw = self.transform_body_to_worldframe(self.x, self.y, xw, yw, th)
     self.xcw_list = np.concatenate((self.xcw_list, xcw))
@@ -347,13 +439,13 @@ class lane_driver:
 
   # Define a callback for the Image message
   def image_callback(self, img_msg):
-    if(time.time() - self.last_inference < self.expected_frame_time or (not self.done_processing) ):
+    if(time.time() - self.last_inference < self.expected_frame_time or not self.done_processing or not self.have_gps):
       return
     self.done_processing = False
     self.last_inference = time.time()
-    global DEBUG
     world_X, world_Y, world_th = self.posX, self.posY, self.inferred_yaw
     # Try to convert the ROS Image message to a CV2 Image
+    global DEBUG
     try:
       cv_image = bridge.imgmsg_to_cv2(img_msg, "bgr8")# [:,:,:3]
       cv_image = cv_image[cv_image.shape[0]//2:,:,:]
@@ -365,34 +457,13 @@ class lane_driver:
       self.lane_stuff(x, y, world_X, world_Y, world_th)
       # self.x, self.y = self.project_cam_to_bodyframe(x, y)
       try:
-        # last_x, last_y = self.transform_world_to_bodyframe(np.copy(self.xcw_list), np.copy(self.ycw_list), world_X, world_Y, world_th, radius = 5)
-        # index = np.where(last_x > self.min_dist)
-        # last_x = last_x[index]
-        # last_y = last_y[index]
-        # # index = np.where(np.fabs(last_y) < self.LWB2)
-        # # last_x = last_x[index]
-        # # last_y = last_y[index]
-
-        # last_x = last_x[-40:]
-        # last_y = last_y[-40:]  # limit number of points      
-        # pc_filt = np.poly1d(np.polyfit(last_x, last_y, 2))
-        # max_dist = np.max(last_x)
-        # fit_x = last_x #np.arange(self.min_dist, max_dist, 0.5)
-        # fit_y = last_y #pc_filt(fit_x)
-        # x, y = self.project_bodyframe_to_cam(np.copy(fit_x), np.copy(fit_y))
-        # pts = np.column_stack((np.int32(x),np.int32(y)))
-        # # cv2.polylines(lane_img, [pts], False, (0,0,0), 5)
         x, y = self.project_bodyframe_to_cam(np.copy(self.gps_xb), np.copy(self.gps_yb))
         pts = np.column_stack((np.int32(x),np.int32(y)))
         cv2.polylines(lane_img, [pts], False, (255,255,255), 5)
-        # x, y = self.project_bodyframe_to_cam(np.copy(self.x), np.copy(self.y))
-        # pts = np.column_stack((np.int32(x),np.int32(y)))
-        # # cv2.polylines(lane_img, [pts], False, (255,255,0), 5)
-        # self.fit_x, self.fit_y = self.transform_body_to_worldframe(fit_x, fit_y, world_X, world_Y, world_th)
       except:
         print(traceback.format_exc())
       if DEBUG:
-        lane_img = cv2.resize(lane_img, (800, 400))
+        lane_img = cv2.resize(lane_img, (400, 400))
         cv2.imshow("test", lane_img)
         cv2.waitKey(1)
 
@@ -405,20 +476,4 @@ lane_detector = lane_driver()  # create object
 
 while not rospy.is_shutdown():
   time.sleep(0.1)
-  try:
-    # if(lane_detector.x.any()):
-    plt.clf()
-    # for i in range(len(lane_detector.x)):
-    # plt.scatter(lane_detector.xcw_list,lane_detector.ycw_list)
-    # for i in range(len(lane_detector.x)):
-    plt.scatter(lane_detector.gps_x - lane_detector.init_pos[0], lane_detector.gps_y - lane_detector.init_pos[1], color="black")
-    plt.scatter(lane_detector.xcw_list, lane_detector.ycw_list, color="blue")
-    plt.scatter(lane_detector.pos[0], lane_detector.pos[1], color="red")
-    plt.scatter(lane_detector.fit_x, lane_detector.fit_y, color="green")    
-    plt.axis("equal")
-    plt.show()
-    plt.pause(0.01)
-  except:
-    pass
-    # print(traceback.format_exc())
 

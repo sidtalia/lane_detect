@@ -44,11 +44,6 @@ def find_route(start_lat,start_lon,end_lat,end_lon, home_lat, home_lon):
 		Y = gaussian_filter(Y,sigma=1)
 		X = gaussian_filter(X,sigma=1)
 
-	# print(X,Y)
-	plt.scatter(X,Y)
-	plt.axis('equal')
-	plt.show()
-
 	return X,Y
 
 
