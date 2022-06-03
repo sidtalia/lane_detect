@@ -95,7 +95,6 @@ class lane_driver:
     self.have_gps = False
     # Initalize a subscriber to the "/camera/rgb/image_raw" topic with the function "image_callback" as a callback
     sub_image = rospy.Subscriber("/zed2/zed_node/left/image_rect_color", Image, self.image_callback, queue_size=1)
-    sub_odom = rospy.Subscriber("/mavros/local_position/odom", Odometry, self.odom_callback, queue_size = 1)
     sub_pose = rospy.Subscriber("/mavros/local_position/pose", PoseStamped, self.pose_callback, queue_size=1)
     sub_gps = rospy.Subscriber("/mavros/global_position/global", NavSatFix, self.gps_callback, queue_size=1)
     self.lane_pub = rospy.Publisher("/lane_node/points", PoseArray, queue_size = 10)
@@ -120,40 +119,6 @@ class lane_driver:
     x, y, z, w = q.x, q.y, q.z, q.w
     roll, pitch, yaw = tf.transformations.euler_from_quaternion((x, y, z, w))
     return np.array([roll, pitch, yaw])
-
-  def odom_callback(self, msg):
-    self.pos[0] = msg.pose.pose.position.x
-    self.pos[1] = msg.pose.pose.position.y
-    self.pos[2] = msg.pose.pose.position.z
-
-    if(self.init == False):
-      self.init_pos = np.copy(self.pos)
-      self.init = True
-
-    self.pos -= self.init_pos
-    self.vel[0] = msg.twist.twist.linear.x
-    self.vel[1] = msg.twist.twist.linear.y
-    self.vel[2] = msg.twist.twist.linear.z
-
-    self.rotBF[0] = msg.twist.twist.angular.x
-    self.rotBF[1] = msg.twist.twist.angular.y
-    self.rotBF[2] = -msg.twist.twist.angular.z
-
-    self.quat[0] = msg.pose.pose.orientation.x
-    self.quat[1] = msg.pose.pose.orientation.y
-    self.quat[2] = msg.pose.pose.orientation.z
-    self.quat[3] = msg.pose.pose.orientation.w
-
-    rpy = self.quaternion_to_angle(msg.pose.pose.orientation)
-    rpy_diff = rpy - self.rpy
-    self.rpy = rpy
-    # print(self.rpy*57.3)
-    self.inferred_yaw = self.rpy[2] + 4/57.3 #self.inferred_yaw + self.rotBF[2]*0.04 ## 50 hz
-    # R = np.array([[m.cos(self.inferred_yaw), -m.sin(self.inferred_yaw)],
-    #               [m.sin(self.inferred_yaw), m.cos(self.inferred_yaw)]])
-    # x, y = np.matmul(R,np.array([np.linalg.norm(self.vel)*0.02, 0]))
-    self.posX, self.posY = self.pos[0], self.pos[1] #self.posX + x, self.posY + y
-    self.pitch = 0.8*(rpy_diff[1] + self.pitch)
 
   def gps_callback(self, msg):
     if(not self.have_gps):
